@@ -1,6 +1,24 @@
 # Agent Team
 
-A local multi-agent orchestrator built on the [Cursor SDK](https://cursor.com/docs/sdk/typescript). When you run it, it spins up an isolated agent team you can talk to continuously while Coders and Reviewers work in the background.
+A local multi-agent orchestrator: Alfred, Execs, three Coders, and three Reviewers. **No paid cloud API is required** if you use Claude Code CLI (subscription) or Ollama (fully local).
+
+## How agents are powered
+
+| Engine | Cost | What you need |
+|--------|------|----------------|
+| **`claude-cli`** (default if installed) | Uses your **Claude Pro/Max** subscription via OAuth | [Claude Code CLI](https://code.claude.com) + `claude auth login` |
+| **`ollama`** (fallback) | **Free**, runs on your machine | [Ollama](https://ollama.com) + a coding model (e.g. `qwen2.5-coder:7b`) |
+| **`anthropic`** (opt-in only) | **Pay-per-use** API | `ANTHROPIC_API_KEY` + `AGENT_TEAM_ENGINE=anthropic` |
+
+**Claude Pro (claude.ai chat) is not an API.** This app uses either the **Claude Code CLI** (same account, programmatic `-p` mode) or **local Ollama**. It does not bill your Anthropic API account unless you explicitly enable that engine.
+
+### Important: do not set `ANTHROPIC_API_KEY` for subscription mode
+
+If `ANTHROPIC_API_KEY` is in your environment, Claude Code CLI will use **paid API billing** instead of your subscription. For subscription mode, unset it:
+
+```bash
+unset ANTHROPIC_API_KEY
+```
 
 ## Architecture
 
@@ -9,118 +27,95 @@ You  ←→  Alfred  ←→  Execs  ←→  Coders (×3)
                               ↘  Reviewers (×3)
 ```
 
-| Agent | Role |
-|-------|------|
-| **Alfred** | Your single point of contact. Coordinates with Execs and summarizes progress. |
-| **Execs** | Engineering lead. Breaks work into Coder/Reviewer tasks and iterates on feedback. |
-| **Coder 1–3** | Implement code in the active directory (isolated memory each). |
-| **Reviewer 1–3** | Test and review Coder output; report findings to Execs (isolated memory each). |
-
-**Memory isolation:** Each agent is a separate `Agent.create()` / `Agent.resume()` instance with its own conversation history. Agents never see each other's full transcripts—only what the orchestrator forwards in each message.
-
-**Persistence:** Agent IDs are stored in `.agent-team/state.json` under your working directory so sessions can resume.
+**Memory isolation:** Each role has its own session under `.agent-team/sessions/`. The orchestrator only forwards assigned messages between roles.
 
 ## Prerequisites
 
 - Node.js 18+
-- [tmux](https://github.com/tmux/tmux) (for the multi-window UI)
-- A [Cursor API key](https://cursor.com/dashboard/integrations)
+- [tmux](https://github.com/tmux/tmux) (optional, for multi-window UI)
+- **One of:**
+  - Claude Code CLI (for subscription), or
+  - Ollama (for fully local)
 
-### Install tmux
-
-Homebrew is the fastest path on macOS (pre-built bottles, ~30 seconds):
-
-```bash
-eval "$(/opt/homebrew/bin/brew shellenv zsh)"   # add to ~/.zprofile to persist
-brew install tmux
-```
-
-Or use the project helper (detects Homebrew, installs tmux, updates PATH):
+### Option A — Claude subscription (recommended)
 
 ```bash
-npm run install-tmux
-source ~/.zprofile
+npm install -g @anthropic-ai/claude-code
+claude auth login
+# Confirm no API key is exported:
+unset ANTHROPIC_API_KEY
 ```
 
-**Note:** If `brew` says "command not found" after installing Homebrew, it is not on your PATH yet. Run the `eval` line above or open a new terminal after `npm run install-tmux`.
+### Option B — Fully local (no subscription)
+
+```bash
+brew install ollama
+ollama pull qwen2.5-coder:7b
+ollama serve
+export AGENT_TEAM_ENGINE=ollama
+```
 
 ## Setup
 
 ```bash
 cd ~/agent-team
-cp .env.example .env
-# Edit .env and set CURSOR_API_KEY
-
-npm install --cache ./.npm-cache   # use local cache if global npm has permission issues
+npm install
 ```
 
 ## Run
 
-From the project you want Coders to work in:
-
 ```bash
 cd /path/to/your/project
-export CURSOR_API_KEY="cursor_..."
 npx tsx ~/agent-team/src/index.ts
 ```
 
-Or pass the directory explicitly:
+On startup, the app **auto-detects** an engine: Claude CLI first, then Ollama. Force one with:
 
 ```bash
-npx tsx ~/agent-team/src/index.ts /path/to/your/project
+export AGENT_TEAM_ENGINE=claude-cli   # or ollama
 ```
 
-### tmux UI (recommended)
-
-Each agent role gets its own tmux window; Alfred stays interactive in window 0.
+### tmux UI
 
 ```bash
-cd /path/to/your/project
-export CURSOR_API_KEY="cursor_..."
 npm run tmux -- /path/to/your/project
 ```
 
-| Window | Role | What you see |
-|--------|------|--------------|
-| 0 | `alfred` | Interactive chat with Alfred |
-| 1 | `execs` | Execs log stream |
-| 2–4 | `coder-1` … `coder-3` | Coder log streams |
-| 5–7 | `reviewer-1` … `reviewer-3` | Reviewer log streams |
-
-Switch windows: `Ctrl+b` then `0`–`7`. Logs are written to `.agent-team/logs/<role>.log`.
-
-Re-attach to an existing session:
-
-```bash
-npm run tmux -- --attach /path/to/your/project
-```
-
-### Interactive commands
-
-| Command | Description |
-|---------|-------------|
-| `/status` or `/jobs` | List background Coder/Reviewer/Execs jobs |
-| `/help` | Show commands |
-| `/quit` | Exit and close all agents |
-
-## Example flow
-
-1. You tell Alfred: *"Add a REST health endpoint and unit tests."*
-2. Alfred delegates to Execs via `<delegate-execs>`.
-3. Execs assigns one or more Coders with `<assign-coder>`.
-4. When Coders finish, Execs assigns Reviewers with `<assign-reviewer>`.
-5. Reviewers report bugs; Execs may send revised Coder tasks.
-6. Execs reports to Alfred via `<report-alfred>`; you can ask Alfred for a summary anytime.
+| Window | Role |
+|--------|------|
+| 0 | `alfred` (interactive) |
+| 1 | `execs` |
+| 2–4 | `coder-1` … `coder-3` |
+| 5–7 | `reviewer-1` … `reviewer-3` |
 
 ## Configuration
 
 | Variable | Description |
 |----------|-------------|
-| `CURSOR_API_KEY` | Required. Cursor API key. |
-| `AGENT_TEAM_MODEL` | Optional. Model id (default: `composer-2.5` or best available). |
+| `AGENT_TEAM_ENGINE` | `claude-cli`, `ollama`, or `anthropic` (default: auto) |
+| `AGENT_TEAM_MODEL` | Ollama model name or Anthropic model id |
+| `OLLAMA_HOST` | Ollama URL (default `http://127.0.0.1:11434`) |
+| `CLAUDE_CLI_BIN` | Path to `claude` binary (default `claude`) |
+| `ANTHROPIC_API_KEY` | Only for paid `anthropic` engine — **avoid** if using subscription |
+| `AGENT_TEAM_ALLOW_PAID_API` | Set to `1` to allow auto-fallback to paid API when nothing else works |
+
+## Interactive commands
+
+| Command | Description |
+|---------|-------------|
+| `/status` or `/jobs` | Background jobs |
+| `/help` | Help |
+| `/quit` | Exit |
+
+## Example flow
+
+1. You ask Alfred to build a feature.
+2. Alfred delegates to Execs (`<delegate-execs>`).
+3. Execs assigns Coders (`<assign-coder>`); Coders edit the repo (CLI tools or Ollama tool loop).
+4. Execs assigns Reviewers; iteration continues until Execs reports to Alfred.
 
 ## Notes
 
-- Coders and Reviewers use **local** agents with `settingSources: []` so project rules are not mixed across agents unless you change that in code.
-- Long-running work happens asynchronously; keep chatting with Alfred while jobs run.
-- If npm global cache errors occur, use `npm install --cache ./.npm-cache` inside this repo.
+- Local Ollama models are smaller than Claude; complex tasks may need a larger model or Claude CLI.
+- Session files: `.agent-team/sessions/<role>.json`
+- Paid API is **off** by default; enable only if you set `AGENT_TEAM_ENGINE=anthropic`.

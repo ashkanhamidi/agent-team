@@ -1,7 +1,7 @@
 {
   "name": "agent-team",
   "version": "1.0.0",
-  "description": "Multi-agent team with Alfred, Execs, Coders, and Reviewers",
+  "description": "Multi-agent team via Claude CLI subscription or local Ollama",
   "type": "module",
   "bin": {
     "agent-team": "./dist/index.js"
@@ -17,7 +17,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@cursor/sdk": "^1.0.15"
+    "@anthropic-ai/sdk": "^0.78.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

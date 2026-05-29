@@ -64,11 +64,15 @@ export function launchTmuxSession(cwd: string, attachExisting = false): never {
   const entry = join(PACKAGE_ROOT, "src", "index.ts");
 
   const envFlags: string[] = [];
-  if (process.env.CURSOR_API_KEY) {
-    envFlags.push("-e", `CURSOR_API_KEY=${process.env.CURSOR_API_KEY}`);
-  }
-  if (process.env.AGENT_TEAM_MODEL) {
-    envFlags.push("-e", `AGENT_TEAM_MODEL=${process.env.AGENT_TEAM_MODEL}`);
+  for (const key of [
+    "AGENT_TEAM_ENGINE",
+    "AGENT_TEAM_MODEL",
+    "AGENT_TEAM_ALLOW_PAID_API",
+    "OLLAMA_HOST",
+    "CLAUDE_CLI_BIN",
+  ]) {
+    const val = process.env[key];
+    if (val) envFlags.push("-e", `${key}=${val}`);
   }
 
   const runAlfred = [

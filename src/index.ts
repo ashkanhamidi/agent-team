@@ -5,12 +5,8 @@ import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { RoleLogManager, roleLogDir } from "./role-log.js";
 import { launchTmuxSession } from "./tmux.js";
-import {
-  AgentTeam,
-  CursorAgentError,
-  resolveApiKey,
-  resolveModel,
-} from "./team.js";
+import { AgentTeam, AgentBackendError } from "./team.js";
+import { resolveEngine } from "./resolve-engine.js";
 
 interface CliOptions {
   command: "run" | "tmux";
@@ -60,12 +56,13 @@ function loadDotEnv(cwd: string): void {
   }
 }
 
-function banner(cwd: string, roleLogs: boolean): void {
+function banner(cwd: string, roleLogs: boolean, engineLabel: string): void {
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
 ║  Agent Team — Alfred · Execs · 3 Coders · 3 Reviewers   ║
 ╚══════════════════════════════════════════════════════════╝
-  Working directory: ${cwd}${
+  Working directory: ${cwd}
+  Engine: ${engineLabel}${
     roleLogs
       ? `
   tmux: each role streams to .agent-team/logs/<role>.log
@@ -82,25 +79,27 @@ async function runInteractive(opts: CliOptions): Promise<void> {
   const { cwd, roleLogs } = opts;
   loadDotEnv(cwd);
 
-  const apiKey = resolveApiKey();
-  if (!apiKey) {
-    console.error(
-      "Missing CURSOR_API_KEY. Export it or add it to .env in the working directory.\n" +
-        "  https://cursor.com/dashboard/integrations",
-    );
-    process.exit(1);
+  let resolved;
+  try {
+    resolved = await resolveEngine();
+  } catch (err) {
+    if (err instanceof AgentBackendError) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
   }
 
-  const model = await resolveModel(apiKey);
-  banner(cwd, roleLogs);
+  banner(cwd, roleLogs, resolved.label);
 
   const roleLogsWriter = roleLogs ? new RoleLogManager(roleLogDir(cwd)) : null;
   if (roleLogsWriter) roleLogsWriter.init();
 
   const team = new AgentTeam({
     cwd,
-    apiKey,
-    model,
+    engine: resolved.engine,
+    model: resolved.model,
+    apiKey: resolved.apiKey,
     onLog: roleLogs
       ? undefined
       : (line) => {
@@ -128,10 +127,10 @@ async function runInteractive(opts: CliOptions): Promise<void> {
   process.on("SIGTERM", () => void shutdown());
 
   try {
-    console.log(`Using model: ${model}\nBootstrapping agents...`);
+    console.log(`Using: ${resolved.label}\nBootstrapping agents...`);
     await team.initialize();
   } catch (err) {
-    if (err instanceof CursorAgentError) {
+    if (err instanceof AgentBackendError) {
       console.error(`Startup failed: ${err.message}`);
       process.exit(1);
     }
@@ -175,7 +174,7 @@ async function runInteractive(opts: CliOptions): Promise<void> {
       if (reply && !roleLogs) output.write(reply);
       output.write("\n");
     } catch (err) {
-      if (err instanceof CursorAgentError) {
+      if (err instanceof AgentBackendError) {
         console.error(`\nRequest failed: ${err.message}`);
       } else {
         console.error(`\nError: ${err instanceof Error ? err.message : err}`);
@@ -193,12 +192,14 @@ async function main(): Promise<void> {
 
   if (opts.command === "tmux") {
     loadDotEnv(opts.cwd);
-    if (!resolveApiKey()) {
-      console.error(
-        "Missing CURSOR_API_KEY. Export it or add it to .env before starting tmux.\n" +
-          "  https://cursor.com/dashboard/integrations",
-      );
-      process.exit(1);
+    try {
+      await resolveEngine();
+    } catch (err) {
+      if (err instanceof AgentBackendError) {
+        console.error(err.message);
+        process.exit(1);
+      }
+      throw err;
     }
     launchTmuxSession(opts.cwd, opts.attach);
   }

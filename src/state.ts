@@ -1,21 +1,14 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { EngineId } from "./resolve-engine.js";
+
 export interface TeamState {
   cwd: string;
   model: string;
-  agents: {
-    alfred?: string;
-    execs?: string;
-    coders: [string?, string?, string?];
-    reviewers: [string?, string?, string?];
-  };
-  bootstrapped: {
-    alfred?: boolean;
-    execs?: boolean;
-    coders: [boolean, boolean, boolean];
-    reviewers: [boolean, boolean, boolean];
-  };
+  engine: EngineId;
+  /** Schema version for migrations. */
+  version: 3;
 }
 
 const STATE_DIR = ".agent-team";
@@ -24,33 +17,31 @@ export function statePath(cwd: string): string {
   return join(cwd, STATE_DIR, "state.json");
 }
 
-export function emptyState(cwd: string, model: string): TeamState {
-  return {
-    cwd,
-    model,
-    agents: { coders: [], reviewers: [] },
-    bootstrapped: {
-      coders: [false, false, false],
-      reviewers: [false, false, false],
-    },
-  };
+export function emptyState(
+  cwd: string,
+  model: string,
+  engine: EngineId,
+): TeamState {
+  return { cwd, model, engine, version: 3 };
 }
 
-export async function loadState(cwd: string, model: string): Promise<TeamState> {
+export async function loadState(
+  cwd: string,
+  model: string,
+  engine: EngineId,
+): Promise<TeamState> {
   const path = statePath(cwd);
   try {
     const raw = await readFile(path, "utf8");
-    const parsed = JSON.parse(raw) as TeamState;
-    parsed.cwd = cwd;
-    parsed.model = model;
-    parsed.bootstrapped ??= {
-      coders: [false, false, false],
-      reviewers: [false, false, false],
+    const parsed = JSON.parse(raw) as Partial<TeamState>;
+    return {
+      cwd,
+      model,
+      engine: parsed.engine ?? engine,
+      version: 3,
     };
-    parsed.agents ??= { coders: [], reviewers: [] };
-    return parsed;
   } catch {
-    return emptyState(cwd, model);
+    return emptyState(cwd, model, engine);
   }
 }
 

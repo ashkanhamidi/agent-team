@@ -1,9 +1,6 @@
-import {
-  Agent,
-  CursorAgentError,
-  type SDKAgent,
-  type SettingSource,
-} from "@cursor/sdk";
+import { randomUUID } from "node:crypto";
+import { AgentBackendError, type RoleAgent } from "./agent.js";
+import { createRoleAgent } from "./agent-factory.js";
 import {
   ALFRED_BOOTSTRAP,
   EXECS_BOOTSTRAP,
@@ -19,11 +16,16 @@ import {
   type ExecDelegation,
 } from "./protocol.js";
 import { JobBoard } from "./jobs.js";
-import { collectAssistantText, pipeAssistantStream } from "./stream.js";
 import { loadState, saveState, type TeamState } from "./state.js";
+import type { EngineId } from "./resolve-engine.js";
 import type { Role } from "./roles.js";
 
 export type { Role } from "./roles.js";
+export { AgentBackendError } from "./agent.js";
+
+const TOOL_GUIDANCE = `
+
+You can read, write, and list files and run shell commands in the project working directory using the provided tools. Always use tools to inspect and change the codebase — do not invent file contents.`;
 
 class AgentLane {
   private tail: Promise<unknown> = Promise.resolve();
@@ -40,8 +42,9 @@ class AgentLane {
 
 export interface TeamConfig {
   cwd: string;
-  apiKey: string;
+  engine: EngineId;
   model: string;
+  apiKey?: string;
   /** Legacy single-stream log (non-tmux mode). */
   onLog?: (line: string) => void;
   /** Alfred REPL pane in tmux mode. */
@@ -53,7 +56,7 @@ export interface TeamConfig {
 }
 
 export class AgentTeam {
-  private readonly agents = new Map<Role, SDKAgent>();
+  private readonly agents = new Map<Role, RoleAgent>();
   private readonly lanes = new Map<Role, AgentLane>();
   private state!: TeamState;
   readonly jobs = new JobBoard();
@@ -83,153 +86,98 @@ export class AgentTeam {
     return l;
   }
 
-  private agentOptions(name: string) {
-    return {
+  private createAgent(
+    role: Role,
+    system: string,
+    toolsEnabled: boolean,
+  ): RoleAgent {
+    return createRoleAgent(this.config.engine, {
+      cwd: this.config.cwd,
+      model: this.config.model,
       apiKey: this.config.apiKey,
-      model: { id: this.config.model },
-      name,
-      local: {
-        cwd: this.config.cwd,
-        settingSources: [] as SettingSource[],
-      },
-    };
+      role,
+      system,
+      toolsEnabled,
+    });
   }
 
   async initialize(): Promise<void> {
-    this.state = await loadState(this.config.cwd, this.config.model);
+    this.state = await loadState(
+      this.config.cwd,
+      this.config.model,
+      this.config.engine,
+    );
 
-    this.agents.set("alfred", await this.openRole("alfred", "alfred", () => this.state.agents.alfred));
-    this.agents.set("execs", await this.openRole("execs", "execs", () => this.state.agents.execs));
+    this.agents.set(
+      "alfred",
+      this.createAgent("alfred", ALFRED_BOOTSTRAP, false),
+    );
+    this.agents.set(
+      "execs",
+      this.createAgent("execs", EXECS_BOOTSTRAP, false),
+    );
 
     for (let i = 1; i <= 3; i++) {
       const coderRole = `coder-${i}` as Role;
       const reviewerRole = `reviewer-${i}` as Role;
+      const toolHint =
+        this.config.engine === "claude-cli" ? "" : TOOL_GUIDANCE;
       this.agents.set(
         coderRole,
-        await this.openRole(coderRole, `Coder ${i}`, () => this.state.agents.coders[i - 1]),
+        this.createAgent(coderRole, coderBootstrap(i) + toolHint, true),
       );
       this.agents.set(
         reviewerRole,
-        await this.openRole(reviewerRole, `Reviewer ${i}`, () => this.state.agents.reviewers[i - 1]),
+        this.createAgent(
+          reviewerRole,
+          reviewerBootstrap(i) + toolHint,
+          true,
+        ),
       );
     }
 
-    await this.bootstrapAll();
+    await Promise.all(
+      [...this.agents.values()].map((agent) => agent.load()),
+    );
+
     await saveState(this.config.cwd, this.state);
     this.log("Agent team online: Alfred, Execs, 3 Coders, 3 Reviewers.", {
       pane: true,
     });
   }
 
-  private async openRole(
-    role: Role,
-    displayName: string,
-    getId: () => string | undefined,
-  ): Promise<SDKAgent> {
-    const existing = getId();
-    if (existing) {
-      try {
-        return await Agent.resume(existing, this.agentOptions(displayName));
-      } catch {
-        this.log(`Could not resume ${displayName}; creating fresh agent.`, {
-          role,
-        });
-      }
-    }
-    return Agent.create(this.agentOptions(displayName));
-  }
-
-  private persistId(role: Role, agentId: string): void {
-    switch (role) {
-      case "alfred":
-        this.state.agents.alfred = agentId;
-        break;
-      case "execs":
-        this.state.agents.execs = agentId;
-        break;
-      case "coder-1":
-        this.state.agents.coders[0] = agentId;
-        break;
-      case "coder-2":
-        this.state.agents.coders[1] = agentId;
-        break;
-      case "coder-3":
-        this.state.agents.coders[2] = agentId;
-        break;
-      case "reviewer-1":
-        this.state.agents.reviewers[0] = agentId;
-        break;
-      case "reviewer-2":
-        this.state.agents.reviewers[1] = agentId;
-        break;
-      case "reviewer-3":
-        this.state.agents.reviewers[2] = agentId;
-        break;
-    }
-  }
-
-  private async bootstrapAll(): Promise<void> {
-    const alfred = this.agents.get("alfred")!;
-    if (!this.state.bootstrapped.alfred) {
-      await this.runSend("alfred", alfred, ALFRED_BOOTSTRAP, false);
-      this.state.bootstrapped.alfred = true;
-      this.persistId("alfred", alfred.agentId);
-    }
-
-    const execs = this.agents.get("execs")!;
-    if (!this.state.bootstrapped.execs) {
-      await this.runSend("execs", execs, EXECS_BOOTSTRAP, false);
-      this.state.bootstrapped.execs = true;
-      this.persistId("execs", execs.agentId);
-    }
-
-    for (let i = 1; i <= 3; i++) {
-      const coderRole = `coder-${i}` as Role;
-      if (!this.state.bootstrapped.coders[i - 1]) {
-        const agent = this.agents.get(coderRole)!;
-        await this.runSend(coderRole, agent, coderBootstrap(i), false);
-        this.state.bootstrapped.coders[i - 1] = true;
-        this.persistId(coderRole, agent.agentId);
-      }
-      const reviewerRole = `reviewer-${i}` as Role;
-      if (!this.state.bootstrapped.reviewers[i - 1]) {
-        const agent = this.agents.get(reviewerRole)!;
-        await this.runSend(reviewerRole, agent, reviewerBootstrap(i), false);
-        this.state.bootstrapped.reviewers[i - 1] = true;
-        this.persistId(reviewerRole, agent.agentId);
-      }
-    }
-  }
-
   private async runSend(
     role: Role,
-    agent: SDKAgent,
+    agent: RoleAgent,
     message: string,
     streamToUser: boolean,
   ): Promise<string> {
     return this.lane(role).enqueue(async () => {
-      const run = await agent.send(message);
-      this.log(`run ${run.id} started`, { role });
-      const shouldStream =
-        this.config.onRoleChunk != null ||
-        (streamToUser && this.config.onAlfredChunk != null);
-      let text: string;
-      if (shouldStream) {
-        text = await pipeAssistantStream(run.stream(), (chunk) => {
-          this.config.onRoleChunk?.(role, chunk);
-          if (streamToUser && role === "alfred") {
-            this.config.onAlfredChunk?.(chunk);
-          }
-        });
-      } else {
-        text = await collectAssistantText(run.stream());
-      }
-      const result = await run.wait();
-      if (result.status === "error") {
-        throw new Error(`${role} run failed (${result.id})`);
-      }
-      this.log(`run ${run.id} finished`, { role });
-      this.persistId(role, agent.agentId);
+      const runId = randomUUID().slice(0, 8);
+      this.log(`run ${runId} started`, { role });
+
+      const streamToAlfred =
+        streamToUser &&
+        role === "alfred" &&
+        this.config.onAlfredChunk != null;
+
+      const text = await agent.send(
+        message,
+        streamToAlfred
+          ? {
+              onChunk: (chunk) => {
+                this.config.onRoleChunk?.(role, chunk);
+                this.config.onAlfredChunk?.(chunk);
+              },
+            }
+          : this.config.onRoleChunk
+            ? {
+                onChunk: (chunk) => this.config.onRoleChunk?.(role, chunk),
+              }
+            : undefined,
+      );
+
+      this.log(`run ${runId} finished`, { role });
       await saveState(this.config.cwd, this.state);
       return text;
     });
@@ -452,26 +400,3 @@ export class AgentTeam {
     }
   }
 }
-
-export function resolveApiKey(): string | undefined {
-  return process.env.CURSOR_API_KEY?.trim() || undefined;
-}
-
-export async function resolveModel(apiKey: string): Promise<string> {
-  const env = process.env.AGENT_TEAM_MODEL?.trim();
-  if (env) return env;
-  try {
-    const models = await import("@cursor/sdk").then((m) =>
-      m.Cursor.models.list({ apiKey }),
-    );
-    const preferred =
-      models.find((x) => x.id === "composer-2.5") ??
-      models.find((x) => x.aliases?.includes("composer-latest")) ??
-      models[0];
-    return preferred?.id ?? "composer-2.5";
-  } catch {
-    return "composer-2.5";
-  }
-}
-
-export { CursorAgentError };
