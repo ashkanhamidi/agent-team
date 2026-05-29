@@ -1,0 +1,27 @@
+{
+  "name": "agent-team",
+  "version": "1.0.0",
+  "description": "Multi-agent team with Alfred, Execs, Coders, and Reviewers",
+  "type": "module",
+  "bin": {
+    "agent-team": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx src/index.ts",
+    "tmux": "tsx src/index.ts tmux",
+    "install-tmux": "bash scripts/install-tmux.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "tsx": "^4.22.3",
+    "typescript": "^5.9.3"
+  }
+}
